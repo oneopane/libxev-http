@@ -53,8 +53,11 @@ const ClientConnection = struct {
     buffer: [8192]u8,
     read_completion: xev.Completion,
     write_completion: xev.Completion,
+    close_completion: xev.Completion,
     read_len: usize,
     response_data: ?[]u8,
+    is_closing: bool,
+
     fn init(tcp: xev.TCP, server: *Server, allocator: Allocator) ClientConnection {
         return ClientConnection{
             .tcp = tcp,
@@ -64,12 +67,68 @@ const ClientConnection = struct {
             .read_len = 0,
             .read_completion = .{},
             .write_completion = .{},
+            .close_completion = .{},
             .response_data = null,
+            .is_closing = false,
         };
     }
 
     fn deinit(self: *ClientConnection) void {
+        if (!self.is_closing) {
+            self.server.connection_pool.release();
+        }
+        if (self.response_data) |data| {
+            self.allocator.free(data);
+        }
         self.allocator.destroy(self);
+    }
+
+    fn close(self: *ClientConnection, loop: *xev.Loop) void {
+        if (self.is_closing) return;
+        self.is_closing = true;
+
+        // Gracefully close TCP connection
+        self.tcp.close(loop, &self.close_completion, ClientConnection, self, closeCallback);
+    }
+};
+
+/// Server status information
+pub const ServerStatus = struct {
+    active_connections: u32,
+    max_connections: u32,
+    routes_count: u32,
+};
+
+/// Connection pool for managing active connections
+const ConnectionPool = struct {
+    active_connections: std.atomic.Value(u32),
+    max_connections: u32,
+
+    fn init(max_connections: u32) ConnectionPool {
+        return ConnectionPool{
+            .active_connections = std.atomic.Value(u32).init(0),
+            .max_connections = max_connections,
+        };
+    }
+
+    fn tryAcquire(self: *ConnectionPool) bool {
+        while (true) {
+            const current = self.active_connections.load(.acquire);
+            if (current >= self.max_connections) {
+                return false;
+            }
+            if (self.active_connections.cmpxchgWeak(current, current + 1, .acq_rel, .acquire) == null) {
+                return true;
+            }
+        }
+    }
+
+    fn release(self: *ConnectionPool) void {
+        _ = self.active_connections.fetchSub(1, .acq_rel);
+    }
+
+    fn getActiveCount(self: *ConnectionPool) u32 {
+        return self.active_connections.load(.acquire);
     }
 };
 
@@ -79,14 +138,20 @@ pub const Server = struct {
     host: []const u8,
     port: u16,
     router: *Router,
+    connection_pool: ConnectionPool,
 
     pub fn init(allocator: Allocator, host: []const u8, port: u16) !Server {
+        return initWithMaxConnections(allocator, host, port, 1000);
+    }
+
+    pub fn initWithMaxConnections(allocator: Allocator, host: []const u8, port: u16, max_connections: u32) !Server {
         const router = try Router.init(allocator);
         return Server{
             .allocator = allocator,
             .host = host,
             .port = port,
             .router = router,
+            .connection_pool = ConnectionPool.init(max_connections),
         };
     }
 
@@ -115,10 +180,20 @@ pub const Server = struct {
         return try self.router.delete(path, handler);
     }
 
+    /// Get server status information
+    pub fn getStatus(self: *Server) ServerStatus {
+        return ServerStatus{
+            .active_connections = self.connection_pool.getActiveCount(),
+            .max_connections = self.connection_pool.max_connections,
+            .routes_count = @intCast(self.router.routes.items.len),
+        };
+    }
+
     /// Start the HTTP server with complete HTTP processing
     pub fn listen(self: *Server) !void {
         log.info("🚀 Starting libxev-http server on {s}:{}", .{ self.host, self.port });
         log.info("🎯 Routes registered: {}", .{self.router.routes.items.len});
+        log.info("🔗 Max connections: {}", .{self.connection_pool.max_connections});
 
         // Show registered routes
         for (self.router.routes.items) |route| {
@@ -149,6 +224,28 @@ pub const Server = struct {
     }
 };
 
+/// Callback for closing connections
+fn closeCallback(
+    userdata: ?*ClientConnection,
+    loop: *xev.Loop,
+    completion: *xev.Completion,
+    tcp: xev.TCP,
+    result: xev.CloseError!void,
+) xev.CallbackAction {
+    _ = loop;
+    _ = completion;
+    _ = tcp;
+    const client_conn = userdata.?;
+
+    result catch |err| {
+        log.err("Failed to close connection: {any}", .{err});
+    };
+
+    log.info("🔒 Connection closed", .{});
+    client_conn.deinit();
+    return .disarm;
+}
+
 /// Callback for accepting new connections
 fn acceptCallback(
     userdata: ?*Server,
@@ -164,11 +261,18 @@ fn acceptCallback(
         return .rearm;
     };
 
-    log.info("📥 Accepted new connection", .{});
+    // Check if connection pool is full
+    if (!server.connection_pool.tryAcquire()) {
+        log.warn("⚠️  Connection pool full, rejecting connection. Active: {}", .{server.connection_pool.getActiveCount()});
+        return .rearm;
+    }
+
+    log.info("📥 Accepted new connection (Active: {})", .{server.connection_pool.getActiveCount()});
 
     // Create client connection
     const client_conn = server.allocator.create(ClientConnection) catch |err| {
         log.err("Failed to allocate client connection: {any}", .{err});
+        server.connection_pool.release();
         return .rearm;
     };
 
@@ -197,13 +301,13 @@ fn readCallback(
 
     const bytes_read = result catch |err| {
         log.err("Failed to read from connection: {any}", .{err});
-        client_conn.deinit();
+        client_conn.close(loop);
         return .disarm;
     };
 
     if (bytes_read == 0) {
         log.info("📤 Connection closed by client", .{});
-        client_conn.deinit();
+        client_conn.close(loop);
         return .disarm;
     }
 
@@ -286,7 +390,6 @@ fn writeCallback(
     buffer: xev.WriteBuffer,
     result: xev.WriteError!usize,
 ) xev.CallbackAction {
-    _ = loop;
     _ = completion;
     _ = tcp;
     _ = buffer;
@@ -294,14 +397,14 @@ fn writeCallback(
 
     const bytes_written = result catch |err| {
         log.err("Failed to write response: {any}", .{err});
-        client_conn.deinit();
+        client_conn.close(loop);
         return .disarm;
     };
 
     log.info("✅ Sent {} bytes response", .{bytes_written});
 
     // Close connection after sending response
-    client_conn.deinit();
+    client_conn.close(loop);
     return .disarm;
 }
 
@@ -327,6 +430,11 @@ fn sendErrorResponse(client_conn: *ClientConnection, loop: *xev.Loop, status: St
 /// Create a new HTTP server
 pub fn createServer(allocator: Allocator, host: []const u8, port: u16) !Server {
     return try Server.init(allocator, host, port);
+}
+
+/// Create a new HTTP server with custom max connections
+pub fn createServerWithMaxConnections(allocator: Allocator, host: []const u8, port: u16, max_connections: u32) !Server {
+    return try Server.initWithMaxConnections(allocator, host, port, max_connections);
 }
 
 // Tests
