@@ -25,7 +25,6 @@ pub const HttpConfig = struct {
     // Memory management
     buffer_size: usize = 8192,
     max_buffers: usize = 200,
-    max_request_size: usize = 1024 * 1024, // 1MB
 
     // Routing system
     max_routes: usize = 100,
@@ -34,11 +33,26 @@ pub const HttpConfig = struct {
     // Middleware system
     max_middlewares: usize = 50,
 
-    // Security settings
-    max_header_count: usize = 100,
-    max_header_size: usize = 8192,
-    max_uri_length: usize = 2048,
-    max_body_size: usize = 10 * 1024 * 1024, // 10MB
+    // Connection and timeout settings
+    connection_timeout_ms: u32 = 30000, // Maximum connection lifetime
+    request_timeout_ms: u32 = 30000, // Maximum time to receive complete request
+    header_timeout_ms: u32 = 10000, // Maximum time to receive headers
+    body_timeout_ms: u32 = 60000, // Maximum time to receive body
+    idle_timeout_ms: u32 = 5000, // Connection idle timeout
+
+    // Request size limits
+    max_request_size: usize = 1024 * 1024, // Maximum total request size (1MB)
+    max_header_count: usize = 100, // Maximum number of headers
+    max_header_size: usize = 8192, // Maximum size of individual header
+    max_uri_length: usize = 2048, // Maximum URI length
+    max_body_size: usize = 10 * 1024 * 1024, // Maximum body size (10MB)
+
+    // Body processing settings
+    body_read_threshold_percent: u8 = 10, // Minimum body percentage for progress validation
+
+    // Security and protection features
+    enable_request_validation: bool = true, // Enable request validation
+    enable_timeout_protection: bool = true, // Enable timeout-based protection
 
     // Performance settings
     enable_keep_alive: bool = true,
@@ -90,6 +104,12 @@ pub const HttpConfig = struct {
             .enable_error_log = true,
             .read_timeout_ms = 10000,
             .write_timeout_ms = 10000,
+            // More lenient timeouts for development
+            .connection_timeout_ms = 60000,
+            .request_timeout_ms = 60000,
+            .header_timeout_ms = 20000,
+            .body_timeout_ms = 120000,
+            .idle_timeout_ms = 10000,
         };
     }
 
@@ -120,6 +140,12 @@ pub const HttpConfig = struct {
             .enable_error_log = true,
             .read_timeout_ms = 1000,
             .write_timeout_ms = 1000,
+            // Fast timeouts for testing
+            .connection_timeout_ms = 5000,
+            .request_timeout_ms = 5000,
+            .header_timeout_ms = 2000,
+            .body_timeout_ms = 3000,
+            .idle_timeout_ms = 1000,
         };
     }
 };

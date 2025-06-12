@@ -15,6 +15,7 @@ const std = @import("std");
 const xev = @import("xev");
 const net = std.net;
 const log = std.log;
+const security = @import("security.zig");
 
 // Version information
 pub const version = "1.0.0";
@@ -45,6 +46,12 @@ pub const HttpConfig = @import("config.zig").HttpConfig;
 pub const AppConfig = @import("config.zig").AppConfig;
 pub const loadConfig = @import("config.zig").loadConfig;
 
+// Re-export security modules
+pub const Security = @import("security.zig");
+pub const SecurityLimits = @import("security.zig").SecurityLimits;
+pub const SecurityResult = @import("security.zig").SecurityResult;
+pub const ConnectionTiming = @import("security.zig").ConnectionTiming;
+
 /// Client connection context for handling HTTP requests
 const ClientConnection = struct {
     tcp: xev.TCP,
@@ -55,8 +62,11 @@ const ClientConnection = struct {
     write_completion: xev.Completion,
     close_completion: xev.Completion,
     read_len: usize,
+    total_read: usize,
     response_data: ?[]u8,
     is_closing: bool,
+    timing: security.ConnectionTiming,
+    request_buffer: std.ArrayList(u8),
 
     fn init(tcp: xev.TCP, server: *Server, allocator: Allocator) ClientConnection {
         return ClientConnection{
@@ -65,21 +75,27 @@ const ClientConnection = struct {
             .allocator = allocator,
             .buffer = undefined,
             .read_len = 0,
+            .total_read = 0,
             .read_completion = .{},
             .write_completion = .{},
             .close_completion = .{},
             .response_data = null,
             .is_closing = false,
+            .timing = security.ConnectionTiming.init(),
+            .request_buffer = std.ArrayList(u8).init(allocator),
         };
     }
 
     fn deinit(self: *ClientConnection) void {
-        if (!self.is_closing) {
-            self.server.connection_pool.release();
-        }
+        // Clean up response data
         if (self.response_data) |data| {
             self.allocator.free(data);
         }
+
+        // Clean up request buffer
+        self.request_buffer.deinit();
+
+        // Destroy the connection object
         self.allocator.destroy(self);
     }
 
@@ -87,8 +103,36 @@ const ClientConnection = struct {
         if (self.is_closing) return;
         self.is_closing = true;
 
+        // Release connection pool slot immediately
+        self.server.connection_pool.release();
+
         // Gracefully close TCP connection
         self.tcp.close(loop, &self.close_completion, ClientConnection, self, closeCallback);
+    }
+
+    /// Check if connection has timed out or has processing issues
+    fn checkTimeouts(self: *ClientConnection) bool {
+        const result = security.checkRequestTimeouts(&self.timing, self.server.config);
+
+        switch (result) {
+            .allowed => return false,
+            .connection_timeout => {
+                log.warn("⏰ Connection timeout exceeded", .{});
+                return true;
+            },
+            .idle_timeout => {
+                log.warn("⏰ Idle timeout exceeded", .{});
+                return true;
+            },
+            .processing_timeout => {
+                log.warn("⏱️ Request processing timeout", .{});
+                return true;
+            },
+            else => {
+                log.warn("🚫 Request validation failed: {s}", .{security.getSecurityResultDescription(result)});
+                return true;
+            },
+        }
     }
 };
 
@@ -139,19 +183,27 @@ pub const Server = struct {
     port: u16,
     router: *Router,
     connection_pool: ConnectionPool,
+    config: HttpConfig,
 
     pub fn init(allocator: Allocator, host: []const u8, port: u16) !Server {
-        return initWithMaxConnections(allocator, host, port, 1000);
+        return initWithConfig(allocator, host, port, HttpConfig{});
     }
 
     pub fn initWithMaxConnections(allocator: Allocator, host: []const u8, port: u16, max_connections: u32) !Server {
+        var config = HttpConfig{};
+        config.max_connections = max_connections;
+        return initWithConfig(allocator, host, port, config);
+    }
+
+    pub fn initWithConfig(allocator: Allocator, host: []const u8, port: u16, config: HttpConfig) !Server {
         const router = try Router.init(allocator);
         return Server{
             .allocator = allocator,
             .host = host,
             .port = port,
             .router = router,
-            .connection_pool = ConnectionPool.init(max_connections),
+            .connection_pool = ConnectionPool.init(@intCast(config.max_connections)),
+            .config = config,
         };
     }
 
@@ -238,7 +290,7 @@ fn closeCallback(
     const client_conn = userdata.?;
 
     result catch |err| {
-        log.err("Failed to close connection: {any}", .{err});
+        log.warn("Connection close error (expected): {any}", .{err});
     };
 
     log.info("🔒 Connection closed", .{});
@@ -311,21 +363,83 @@ fn readCallback(
         return .disarm;
     }
 
-    client_conn.read_len = bytes_read;
-    log.info("📨 Received {} bytes", .{bytes_read});
+    // Update timing information
+    client_conn.timing.updateReadTime();
+    client_conn.total_read += bytes_read;
 
-    // Process the HTTP request
-    processHttpRequest(client_conn, loop) catch |err| {
-        log.err("Failed to process HTTP request: {any}", .{err});
+    // Check for timeouts and slow attacks
+    if (client_conn.checkTimeouts()) {
+        log.warn("🚫 Closing connection due to timeout or slow attack", .{});
+        client_conn.close(loop);
+        return .disarm;
+    }
+
+    // Check for request size limits using security module
+    const size_result = security.validateRequestSize(client_conn.total_read, client_conn.server.config);
+    if (size_result != .allowed) {
+        log.warn("🚫 {s}: {} bytes (limit: {} bytes)", .{ security.getSecurityResultDescription(size_result), client_conn.total_read, client_conn.server.config.max_request_size });
+        sendErrorResponse(client_conn, loop, .payload_too_large) catch {};
+        return .disarm;
+    }
+
+    log.info("📨 Received {} bytes (total: {})", .{ bytes_read, client_conn.total_read });
+
+    // Append data to request buffer
+    client_conn.request_buffer.appendSlice(client_conn.buffer[0..bytes_read]) catch |err| {
+        log.err("Failed to append to request buffer: {any}", .{err});
         sendErrorResponse(client_conn, loop, .internal_server_error) catch {};
+        return .disarm;
     };
 
-    return .disarm;
+    // Check if we have complete headers
+    if (!client_conn.timing.headers_complete) {
+        if (std.mem.indexOf(u8, client_conn.request_buffer.items, "\r\n\r\n")) |_| {
+            // Parse Content-Length if present
+            const content_length = security.parseContentLength(client_conn.request_buffer.items);
+            client_conn.timing.setHeadersComplete(content_length);
+        }
+    }
+
+    // Update body length tracking
+    if (client_conn.timing.headers_complete) {
+        const header_end = std.mem.indexOf(u8, client_conn.request_buffer.items, "\r\n\r\n");
+        const body_length = if (header_end) |end_pos|
+            client_conn.request_buffer.items.len - (end_pos + 4)
+        else
+            0;
+        client_conn.timing.updateBodyLength(body_length);
+    }
+
+    // Try to process the request if we have enough data
+    const should_process = blk: {
+        if (!client_conn.timing.headers_complete) {
+            break :blk false; // Need complete headers
+        }
+
+        if (client_conn.timing.expected_body_length) |expected| {
+            break :blk client_conn.timing.received_body_length >= expected; // Need complete body
+        }
+
+        break :blk true; // No body expected, headers are enough
+    };
+
+    if (should_process) {
+        // Process the complete HTTP request
+        processHttpRequestFromBuffer(client_conn, loop) catch |err| {
+            log.err("Failed to process HTTP request: {any}", .{err});
+            sendErrorResponse(client_conn, loop, .internal_server_error) catch {};
+        };
+        return .disarm;
+    } else {
+        // Continue reading more data
+        client_conn.tcp.read(loop, &client_conn.read_completion, .{ .slice = &client_conn.buffer }, ClientConnection, client_conn, readCallback);
+        return .disarm;
+    }
 }
 
-/// Process HTTP request and send response
-fn processHttpRequest(client_conn: *ClientConnection, loop: *xev.Loop) !void {
-    const request_data = client_conn.buffer[0..client_conn.read_len];
+/// Process HTTP request from accumulated buffer and send response
+fn processHttpRequestFromBuffer(client_conn: *ClientConnection, loop: *xev.Loop) !void {
+    const request_data = client_conn.request_buffer.items;
 
     // Parse HTTP request
     var request = HttpRequest.parseFromBuffer(client_conn.allocator, request_data) catch |err| {
@@ -369,6 +483,13 @@ fn processHttpRequest(client_conn: *ClientConnection, loop: *xev.Loop) !void {
 
     log.info("📤 Sending {} bytes response", .{response_data.len});
     try sendResponse(client_conn, loop, response_data);
+}
+
+/// Process HTTP request and send response (legacy function for compatibility)
+fn processHttpRequest(client_conn: *ClientConnection, loop: *xev.Loop) !void {
+    // For legacy compatibility, copy buffer data to request_buffer and process
+    try client_conn.request_buffer.appendSlice(client_conn.buffer[0..client_conn.read_len]);
+    return processHttpRequestFromBuffer(client_conn, loop);
 }
 
 /// Send HTTP response to client
@@ -435,6 +556,11 @@ pub fn createServer(allocator: Allocator, host: []const u8, port: u16) !Server {
 /// Create a new HTTP server with custom max connections
 pub fn createServerWithMaxConnections(allocator: Allocator, host: []const u8, port: u16, max_connections: u32) !Server {
     return try Server.initWithMaxConnections(allocator, host, port, max_connections);
+}
+
+/// Create a new HTTP server with custom configuration
+pub fn createServerWithConfig(allocator: Allocator, host: []const u8, port: u16, config: HttpConfig) !Server {
+    return try Server.initWithConfig(allocator, host, port, config);
 }
 
 // Tests
