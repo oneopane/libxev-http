@@ -138,6 +138,14 @@ pub fn build(b: *std.Build) void {
     });
     security_tests.root_module.addImport("xev", libxev_dep.module("xev"));
 
+    // URL encoding/decoding module tests
+    const url_tests = b.addTest(.{
+        .root_source_file = b.path("src/url.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    url_tests.root_module.addImport("xev", libxev_dep.module("xev"));
+
     // ============================================================================
     // Test Execution Steps
     // ============================================================================
@@ -150,6 +158,7 @@ pub fn build(b: *std.Build) void {
     const run_buffer_tests = b.addRunArtifact(buffer_tests);
     const run_config_tests = b.addRunArtifact(config_tests);
     const run_security_tests = b.addRunArtifact(security_tests);
+    const run_url_tests = b.addRunArtifact(url_tests);
 
     // Individual module test steps
     const request_test_step = b.step("test-request", "📨 Run HTTP request module tests");
@@ -173,6 +182,9 @@ pub fn build(b: *std.Build) void {
     const security_test_step = b.step("test-security", "🛡️ Run security and timeout protection tests");
     security_test_step.dependOn(&run_security_tests.step);
 
+    const url_test_step = b.step("test-url", "🔗 Run URL encoding/decoding module tests");
+    url_test_step.dependOn(&run_url_tests.step);
+
     // ============================================================================
     // Comprehensive Test Suites
     // ============================================================================
@@ -188,6 +200,7 @@ pub fn build(b: *std.Build) void {
     test_all_step.dependOn(&run_buffer_tests.step);
     test_all_step.dependOn(&run_config_tests.step);
     test_all_step.dependOn(&run_security_tests.step);
+    test_all_step.dependOn(&run_url_tests.step);
 
     // Coverage analysis (runs all tests with detailed output)
     const test_coverage_step = b.step("test-coverage", "📊 Run all tests with coverage analysis");
@@ -245,6 +258,7 @@ pub fn build(b: *std.Build) void {
         \\  test-buffer                Test buffer module
         \\  test-config                Test configuration module
         \\  test-security              Test security and timeout protection
+        \\  test-url                   Test URL encoding/decoding module
         \\
         \\💡 Usage Examples:
         \\  zig build run-basic -- --mode=secure

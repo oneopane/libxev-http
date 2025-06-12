@@ -8,6 +8,7 @@ const StringHashMap = std.StringHashMap;
 // Import Context from context.zig
 const Context = @import("context.zig").Context;
 const HttpMethod = @import("request.zig").HttpMethod;
+const url = @import("url.zig");
 
 /// Route handler function type
 pub const HandlerFn = *const fn (*Context) anyerror!void;
@@ -35,8 +36,65 @@ pub const Route = struct {
     }
 };
 
-/// Parameter and wildcard route matching
-pub fn matchRouteWithParams(pattern: []const u8, path: []const u8) bool {
+/// Parameter and wildcard route matching with URL decoding support
+/// This function uses a temporary allocator for URL decoding during matching
+pub fn matchRouteWithParams(allocator: Allocator, pattern: []const u8, path: []const u8) !bool {
+    // Split and decode path components
+    var path_components = url.splitAndDecodePath(allocator, path) catch {
+        // If URL decoding fails, fall back to raw matching for safety
+        return matchRouteWithParamsRaw(pattern, path);
+    };
+    defer url.freePathComponents(allocator, &path_components);
+
+    // Split pattern components (patterns are not URL encoded)
+    var pattern_parts = std.mem.splitScalar(u8, pattern, '/');
+    var pattern_components = std.ArrayList([]const u8).init(allocator);
+    defer pattern_components.deinit();
+
+    while (pattern_parts.next()) |part| {
+        if (part.len == 0) continue; // Skip empty parts
+        try pattern_components.append(part);
+    }
+
+    // Compare components
+    if (pattern_components.items.len != path_components.items.len) {
+        // Check for wildcard at the end
+        if (pattern_components.items.len > 0) {
+            const last_pattern = pattern_components.items[pattern_components.items.len - 1];
+            if (std.mem.eql(u8, last_pattern, "*")) {
+                return pattern_components.items.len <= path_components.items.len + 1;
+            }
+        }
+        return false;
+    }
+
+    for (pattern_components.items, 0..) |pattern_part, i| {
+        const path_part = path_components.items[i];
+
+        // Parameter matching (:param)
+        if (pattern_part.len > 0 and pattern_part[0] == ':') {
+            if (path_part.len == 0) {
+                return false;
+            }
+            continue;
+        }
+
+        // Wildcard matching (*)
+        if (std.mem.eql(u8, pattern_part, "*")) {
+            return true;
+        }
+
+        // Exact matching (case-sensitive)
+        if (!std.mem.eql(u8, pattern_part, path_part)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+/// Fallback raw matching without URL decoding (for compatibility)
+fn matchRouteWithParamsRaw(pattern: []const u8, path: []const u8) bool {
     var pattern_parts = std.mem.splitScalar(u8, pattern, '/');
     var path_parts = std.mem.splitScalar(u8, path, '/');
 
@@ -140,8 +198,8 @@ pub const Router = struct {
         return null;
     }
 
-    /// Route matching algorithm
-    fn matchRoute(_: *Router, pattern: []const u8, path: []const u8) bool {
+    /// Route matching algorithm with URL decoding support
+    fn matchRoute(self: *Router, pattern: []const u8, path: []const u8) bool {
         // Fast path for exact matches
         if (std.mem.eql(u8, pattern, path)) {
             return true;
@@ -152,11 +210,42 @@ pub const Router = struct {
             return false;
         }
 
-        return matchRouteWithParams(pattern, path);
+        return matchRouteWithParams(self.allocator, pattern, path) catch false;
     }
 
-    /// Extract parameters from URL path
+    /// Extract parameters from URL path with proper URL decoding
     pub fn extractParams(self: *Router, pattern: []const u8, path: []const u8, ctx: *Context) !void {
+        // Split and decode path components
+        var path_components = url.splitAndDecodePath(self.allocator, path) catch {
+            // If URL decoding fails, fall back to raw extraction
+            return self.extractParamsRaw(pattern, path, ctx);
+        };
+        defer url.freePathComponents(self.allocator, &path_components);
+
+        // Split pattern components (patterns are not URL encoded)
+        var pattern_parts = std.mem.splitScalar(u8, pattern, '/');
+        var pattern_components = std.ArrayList([]const u8).init(self.allocator);
+        defer pattern_components.deinit();
+
+        while (pattern_parts.next()) |part| {
+            if (part.len == 0) continue; // Skip empty parts
+            try pattern_components.append(part);
+        }
+
+        // Extract parameters from matching components
+        const min_len = @min(pattern_components.items.len, path_components.items.len);
+        for (pattern_components.items[0..min_len], 0..) |pattern_part, i| {
+            // Extract parameter
+            if (pattern_part.len > 0 and pattern_part[0] == ':') {
+                const param_name = pattern_part[1..];
+                const decoded_value = path_components.items[i];
+                try ctx.setParam(param_name, decoded_value);
+            }
+        }
+    }
+
+    /// Fallback parameter extraction without URL decoding
+    fn extractParamsRaw(self: *Router, pattern: []const u8, path: []const u8, ctx: *Context) !void {
         _ = self;
 
         var pattern_parts = std.mem.splitScalar(u8, pattern, '/');
@@ -193,16 +282,89 @@ test "router creation" {
 
 test "route matching" {
     const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
 
     // Test exact match
-    try testing.expect(matchRouteWithParams("/users", "/users"));
+    try testing.expect(try matchRouteWithParams(allocator, "/users", "/users"));
 
     // Test parameter match
-    try testing.expect(matchRouteWithParams("/users/:id", "/users/123"));
+    try testing.expect(try matchRouteWithParams(allocator, "/users/:id", "/users/123"));
 
     // Test wildcard match
-    try testing.expect(matchRouteWithParams("/static/*", "/static/css/style.css"));
+    try testing.expect(try matchRouteWithParams(allocator, "/static/*", "/static/css/style.css"));
 
     // Test no match
-    try testing.expect(!matchRouteWithParams("/users", "/posts"));
+    try testing.expect(!try matchRouteWithParams(allocator, "/users", "/posts"));
+}
+
+test "route matching with URL encoding" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    // Test URL-encoded slash in path component
+    try testing.expect(try matchRouteWithParams(allocator, "/files/:filename", "/files/foo%2Fbar.txt"));
+
+    // Test URL-encoded space in path component
+    try testing.expect(try matchRouteWithParams(allocator, "/files/:filename", "/files/my%20file.txt"));
+
+    // Test multiple encoded components
+    try testing.expect(try matchRouteWithParams(allocator, "/users/:id/files/:filename", "/users/user%20123/files/doc%2Epdf"));
+
+    // Test that encoded slash doesn't break path structure
+    try testing.expect(!try matchRouteWithParams(allocator, "/files/:filename/download", "/files/foo%2Fbar.txt"));
+}
+
+test "parameter extraction with URL encoding" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    // Create a mock request and response for context
+    const HttpRequest = @import("request.zig").HttpRequest;
+    const HttpResponse = @import("response.zig").HttpResponse;
+    const HttpConfig = @import("config.zig").HttpConfig;
+
+    const raw_request = "GET /test HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    const config = HttpConfig{};
+    var request = try HttpRequest.parseFromBuffer(allocator, raw_request, config);
+    defer request.deinit();
+
+    var response = HttpResponse.init(allocator);
+    defer response.deinit();
+
+    var ctx = Context.init(allocator, &request, &response);
+    defer ctx.deinit();
+
+    const router = try Router.init(allocator);
+    defer {
+        router.deinit();
+        allocator.destroy(router);
+    }
+
+    // Test parameter extraction with URL-encoded slash
+    try router.extractParams("/files/:filename", "/files/foo%2Fbar.txt", &ctx);
+    const filename = ctx.getParam("filename");
+    try testing.expect(filename != null);
+    try testing.expectEqualStrings("foo/bar.txt", filename.?);
+
+    // Clear params for next test (properly free memory)
+    {
+        var it = ctx.params.iterator();
+        while (it.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+            allocator.free(entry.value_ptr.*);
+        }
+        ctx.params.clearAndFree();
+    }
+
+    // Test parameter extraction with URL-encoded space
+    try router.extractParams("/users/:name", "/users/John%20Doe", &ctx);
+    const name = ctx.getParam("name");
+    try testing.expect(name != null);
+    try testing.expectEqualStrings("John Doe", name.?);
 }
