@@ -10,6 +10,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const StringHashMap = std.StringHashMap;
+const HttpConfig = @import("config.zig").HttpConfig;
 
 /// HTTP method enumeration
 /// Defines all standard HTTP methods
@@ -81,9 +82,11 @@ pub const HttpRequest = struct {
 
     /// Parse raw HTTP request data
     /// Converts byte stream to structured request object
-    pub fn parseFromBuffer(allocator: Allocator, buffer: []const u8) !Self {
-        // Request size validation
-        if (buffer.len > SecurityLimits.MAX_REQUEST_SIZE) {
+    pub fn parseFromBuffer(allocator: Allocator, buffer: []const u8, config: HttpConfig) !Self {
+        // Basic request size validation - use a reasonable upper bound
+        // We'll validate headers and body separately according to their specific limits
+        const max_reasonable_request = config.max_body_size + 64 * 1024; // body + 64KB for headers
+        if (buffer.len > max_reasonable_request) {
             return error.RequestTooLarge;
         }
 
@@ -102,6 +105,11 @@ pub const HttpRequest = struct {
         const header_end = std.mem.indexOf(u8, buffer, "\r\n\r\n") orelse {
             return error.InvalidRequest;
         };
+
+        // Validate header section size
+        if (header_end > config.max_header_size) {
+            return error.HeadersTooLarge;
+        }
 
         const headers_part = buffer[0..header_end];
 
@@ -128,6 +136,11 @@ pub const HttpRequest = struct {
             const content_length = request.getContentLength();
 
             if (content_length != null and content_length.? > 0) {
+                // Validate body size against configuration
+                if (content_length.? > config.max_body_size) {
+                    return error.BodyTooLarge;
+                }
+
                 // Enhanced boundary checking
                 if (body_start >= buffer.len) {
                     return error.InvalidRequestFormat;
@@ -324,8 +337,9 @@ test "HttpRequest basic GET parsing" {
     const allocator = gpa.allocator();
 
     const raw_request = "GET /hello HTTP/1.1\r\nHost: localhost\r\nUser-Agent: test\r\n\r\n";
+    const config = HttpConfig{};
 
-    var request = try HttpRequest.parseFromBuffer(allocator, raw_request);
+    var request = try HttpRequest.parseFromBuffer(allocator, raw_request, config);
     defer request.deinit();
 
     try testing.expectEqualStrings("GET", request.method);
@@ -351,8 +365,9 @@ test "HttpRequest with query parameters" {
     const allocator = gpa.allocator();
 
     const raw_request = "GET /search?q=zig&limit=10 HTTP/1.1\r\nHost: example.com\r\n\r\n";
+    const config = HttpConfig{};
 
-    var request = try HttpRequest.parseFromBuffer(allocator, raw_request);
+    var request = try HttpRequest.parseFromBuffer(allocator, raw_request, config);
     defer request.deinit();
 
     try testing.expectEqualStrings("GET", request.method);
@@ -368,8 +383,9 @@ test "HttpRequest POST with body" {
     const allocator = gpa.allocator();
 
     const raw_request = "POST /api/users HTTP/1.1\r\nHost: api.example.com\r\nContent-Type: application/json\r\nContent-Length: 25\r\n\r\n{\"name\":\"John\",\"age\":30}";
+    const config = HttpConfig{};
 
-    var request = try HttpRequest.parseFromBuffer(allocator, raw_request);
+    var request = try HttpRequest.parseFromBuffer(allocator, raw_request, config);
     defer request.deinit();
 
     try testing.expectEqualStrings("POST", request.method);
@@ -387,4 +403,36 @@ test "HttpMethod enum" {
 
     try testing.expectEqualStrings("GET", HttpMethod.GET.toString());
     try testing.expectEqualStrings("POST", HttpMethod.POST.toString());
+}
+
+test "HttpRequest body size validation" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    // Test with small body size limit
+    var config = HttpConfig{};
+    config.max_body_size = 10; // Very small limit for testing
+
+    const raw_request = "POST /api/test HTTP/1.1\r\nContent-Length: 20\r\n\r\nThis is a long body content";
+
+    const result = HttpRequest.parseFromBuffer(allocator, raw_request, config);
+    try testing.expectError(error.BodyTooLarge, result);
+}
+
+test "HttpRequest header size validation" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    // Test with small header size limit
+    var config = HttpConfig{};
+    config.max_header_size = 50; // Very small limit for testing
+
+    const raw_request = "GET /test HTTP/1.1\r\nVery-Long-Header-Name-That-Exceeds-Limit: value\r\nAnother-Header: value\r\n\r\n";
+
+    const result = HttpRequest.parseFromBuffer(allocator, raw_request, config);
+    try testing.expectError(error.HeadersTooLarge, result);
 }

@@ -374,10 +374,10 @@ fn readCallback(
         return .disarm;
     }
 
-    // Check for request size limits using security module
-    const size_result = security.validateRequestSize(client_conn.total_read, client_conn.server.config);
-    if (size_result != .allowed) {
-        log.warn("🚫 {s}: {} bytes (limit: {} bytes)", .{ security.getSecurityResultDescription(size_result), client_conn.total_read, client_conn.server.config.max_request_size });
+    // Check for reasonable request size limits - allow for large bodies but prevent abuse
+    const max_reasonable_request = client_conn.server.config.max_body_size + 64 * 1024; // body + 64KB for headers
+    if (client_conn.total_read > max_reasonable_request) {
+        log.warn("🚫 Request too large: {} bytes (limit: {} bytes)", .{ client_conn.total_read, max_reasonable_request });
         sendErrorResponse(client_conn, loop, .payload_too_large) catch {};
         return .disarm;
     }
@@ -442,7 +442,7 @@ fn processHttpRequestFromBuffer(client_conn: *ClientConnection, loop: *xev.Loop)
     const request_data = client_conn.request_buffer.items;
 
     // Parse HTTP request
-    var request = HttpRequest.parseFromBuffer(client_conn.allocator, request_data) catch |err| {
+    var request = HttpRequest.parseFromBuffer(client_conn.allocator, request_data, client_conn.server.config) catch |err| {
         log.err("Failed to parse HTTP request: {any}", .{err});
         try sendErrorResponse(client_conn, loop, .bad_request);
         return;
@@ -605,7 +605,8 @@ test "module integration" {
 
     // Test request parsing
     const raw_request = "GET /hello HTTP/1.1\r\nHost: localhost\r\n\r\n";
-    var request = try HttpRequest.parseFromBuffer(allocator, raw_request);
+    const config = HttpConfig{};
+    var request = try HttpRequest.parseFromBuffer(allocator, raw_request, config);
     defer request.deinit();
 
     // Test response building

@@ -13,6 +13,7 @@ const StringHashMap = std.StringHashMap;
 const HttpRequest = @import("request.zig").HttpRequest;
 const HttpResponse = @import("response.zig").HttpResponse;
 const StatusCode = @import("response.zig").StatusCode;
+const HttpConfig = @import("config.zig").HttpConfig;
 
 /// HTTP request processing context
 /// Encapsulates request and response objects, provides convenient operation methods
@@ -159,7 +160,8 @@ test "Context initialization and cleanup" {
 
     // Create mock request and response
     const raw_request = "GET /test HTTP/1.1\r\nHost: localhost\r\n\r\n";
-    var request = try HttpRequest.parseFromBuffer(allocator, raw_request);
+    const config = HttpConfig{};
+    var request = try HttpRequest.parseFromBuffer(allocator, raw_request, config);
     defer request.deinit();
 
     var response = HttpResponse.init(allocator);
@@ -180,7 +182,8 @@ test "Context parameter operations" {
     const allocator = gpa.allocator();
 
     const raw_request = "GET /test HTTP/1.1\r\nHost: localhost\r\n\r\n";
-    var request = try HttpRequest.parseFromBuffer(allocator, raw_request);
+    const config = HttpConfig{};
+    var request = try HttpRequest.parseFromBuffer(allocator, raw_request, config);
     defer request.deinit();
 
     var response = HttpResponse.init(allocator);
@@ -219,7 +222,8 @@ test "Context state operations" {
     const allocator = gpa.allocator();
 
     const raw_request = "GET /test HTTP/1.1\r\nHost: localhost\r\n\r\n";
-    var request = try HttpRequest.parseFromBuffer(allocator, raw_request);
+    const config = HttpConfig{};
+    var request = try HttpRequest.parseFromBuffer(allocator, raw_request, config);
     defer request.deinit();
 
     var response = HttpResponse.init(allocator);
@@ -253,7 +257,8 @@ test "Context response status code setting" {
     const allocator = gpa.allocator();
 
     const raw_request = "GET /test HTTP/1.1\r\nHost: localhost\r\n\r\n";
-    var request = try HttpRequest.parseFromBuffer(allocator, raw_request);
+    const config = HttpConfig{};
+    var request = try HttpRequest.parseFromBuffer(allocator, raw_request, config);
     defer request.deinit();
 
     var response = HttpResponse.init(allocator);
@@ -277,7 +282,8 @@ test "Context JSON response" {
     const allocator = gpa.allocator();
 
     const raw_request = "GET /test HTTP/1.1\r\nHost: localhost\r\n\r\n";
-    var request = try HttpRequest.parseFromBuffer(allocator, raw_request);
+    const config = HttpConfig{};
+    var request = try HttpRequest.parseFromBuffer(allocator, raw_request, config);
     defer request.deinit();
 
     var response = HttpResponse.init(allocator);
@@ -305,7 +311,8 @@ test "Context text response" {
     const allocator = gpa.allocator();
 
     const raw_request = "GET /test HTTP/1.1\r\nHost: localhost\r\n\r\n";
-    var request = try HttpRequest.parseFromBuffer(allocator, raw_request);
+    const config = HttpConfig{};
+    var request = try HttpRequest.parseFromBuffer(allocator, raw_request, config);
     defer request.deinit();
 
     var response = HttpResponse.init(allocator);
