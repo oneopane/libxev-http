@@ -64,6 +64,12 @@ pub const HttpConfig = struct {
     enable_access_log: bool = true,
     enable_error_log: bool = true,
 
+    // Thread pool configuration
+    enable_thread_pool: bool = false,
+    thread_pool_size: u32 = 0, // 0 = auto-detect CPU cores, >0 = fixed count
+    thread_pool_max_queue_size: u32 = 1000, // Maximum queued tasks
+    thread_pool_stack_size: u32 = 1024 * 1024, // Stack size per thread (1MB)
+
     /// Log level enumeration
     pub const LogLevel = enum {
         debug,
@@ -127,6 +133,9 @@ pub const HttpConfig = struct {
             .write_timeout_ms = 30000,
             .buffer_size = 16384,
             .max_buffers = 1000,
+            .enable_thread_pool = true,
+            .thread_pool_size = 0, // Auto-detect CPU cores for optimal performance
+            .thread_pool_max_queue_size = 5000, // Higher queue limit for production workloads
         };
     }
 

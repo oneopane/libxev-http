@@ -197,6 +197,7 @@ pub const Server = struct {
 
     pub fn initWithConfig(allocator: Allocator, host: []const u8, port: u16, config: HttpConfig) !Server {
         const router = try Router.init(allocator);
+
         return Server{
             .allocator = allocator,
             .host = host,
@@ -232,6 +233,11 @@ pub const Server = struct {
         return try self.router.delete(path, handler);
     }
 
+    /// Check if thread pool is enabled
+    pub fn hasThreadPool(self: *Server) bool {
+        return self.config.enable_thread_pool;
+    }
+
     /// Get server status information
     pub fn getStatus(self: *Server) ServerStatus {
         return ServerStatus{
@@ -252,8 +258,24 @@ pub const Server = struct {
             log.info("   📍 {any} {s}", .{ route.method, route.pattern });
         }
 
-        // Initialize libxev event loop
-        var loop = try xev.Loop.init(.{});
+        // Initialize libxev thread pool if enabled
+        var libxev_thread_pool: ?xev.ThreadPool = null;
+        if (self.config.enable_thread_pool) {
+            libxev_thread_pool = xev.ThreadPool.init(.{
+                .max_threads = if (self.config.thread_pool_size == 0)
+                    @max(1, @as(u32, @intCast(std.Thread.getCpuCount() catch 4)))
+                else
+                    self.config.thread_pool_size,
+                .stack_size = self.config.thread_pool_stack_size,
+            });
+            log.info("🧵 libxev ThreadPool initialized with {} max threads", .{libxev_thread_pool.?.max_threads});
+        }
+        defer if (libxev_thread_pool) |*pool| pool.deinit();
+
+        // Initialize libxev event loop with optional thread pool
+        var loop = try xev.Loop.init(.{
+            .thread_pool = if (libxev_thread_pool) |*pool| pool else null,
+        });
         defer loop.deinit();
 
         // Create TCP server

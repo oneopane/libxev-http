@@ -53,6 +53,9 @@ pub fn main() !void {
             .port = 8080,
             .max_connections = 1000,
             .log_level = .info,
+            // Thread pool configuration
+            .enable_thread_pool = true,
+            .thread_pool_size = 0,
         },
         .secure => libxev_http.HttpConfig{
             .port = 8082,
@@ -75,6 +78,10 @@ pub fn main() !void {
             // Enable all protection features
             .enable_request_validation = true,
             .enable_timeout_protection = true,
+            // Thread pool configuration
+            .enable_thread_pool = true,
+            .thread_pool_size = 4,
+            .thread_pool_max_queue_size = 1000,
             // Performance settings
             .enable_keep_alive = false,
             .enable_compression = false,
@@ -146,6 +153,7 @@ fn indexHandler(ctx: *libxev_http.Context) !void {
             \\            <li>Header count and size limits (50 headers, 4KB each)</li>
             \\            <li>URI length limits (1KB)</li>
             \\            <li>Connection pool management (500 max)</li>
+            \\            <li>Thread pool enabled (4 worker threads)</li>
             \\        </ul>
             \\    </div>
             \\
