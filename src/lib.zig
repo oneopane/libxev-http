@@ -16,6 +16,7 @@ const xev = @import("xev");
 const net = std.net;
 const log = std.log;
 const security = @import("security.zig");
+const middleware = @import("middleware.zig");
 
 // Version information
 pub const version = "1.0.0";
@@ -51,6 +52,23 @@ pub const Security = @import("security.zig");
 pub const SecurityLimits = @import("security.zig").SecurityLimits;
 pub const SecurityResult = @import("security.zig").SecurityResult;
 pub const ConnectionTiming = @import("security.zig").ConnectionTiming;
+
+// Re-export middleware modules
+pub const MiddlewareFn = middleware.MiddlewareFn;
+pub const NextFn = middleware.NextFn;
+pub const MiddlewareChain = middleware.MiddlewareChain;
+pub const Middleware = middleware.Middleware;
+
+// Built-in middleware
+pub const loggingMiddleware = middleware.loggingMiddleware;
+pub const corsMiddleware = middleware.corsMiddleware;
+pub const securityHeadersMiddleware = middleware.securityHeadersMiddleware;
+pub const requestIdMiddleware = middleware.requestIdMiddleware;
+pub const rateLimitMiddleware = middleware.rateLimitMiddleware;
+pub const basicAuthMiddleware = middleware.basicAuthMiddleware;
+pub const jsonBodyParserMiddleware = middleware.jsonBodyParserMiddleware;
+pub const errorHandlerMiddleware = middleware.errorHandlerMiddleware;
+pub const compressionMiddleware = middleware.compressionMiddleware;
 
 /// Client connection context for handling HTTP requests
 const ClientConnection = struct {
@@ -231,6 +249,11 @@ pub const Server = struct {
     /// Add a DELETE route
     pub fn delete(self: *Server, path: []const u8, handler: HandlerFn) !*Route {
         return try self.router.delete(path, handler);
+    }
+
+    /// Add global middleware that applies to all routes
+    pub fn use(self: *Server, name: []const u8, middleware_fn: MiddlewareFn) !void {
+        return try self.router.use(name, middleware_fn);
     }
 
     /// Check if thread pool is enabled

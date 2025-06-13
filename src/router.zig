@@ -9,6 +9,9 @@ const StringHashMap = std.StringHashMap;
 const Context = @import("context.zig").Context;
 const HttpMethod = @import("request.zig").HttpMethod;
 const url = @import("url.zig");
+const middleware = @import("middleware.zig");
+const MiddlewareChain = middleware.MiddlewareChain;
+const MiddlewareFn = middleware.MiddlewareFn;
 
 /// Route handler function type
 pub const HandlerFn = *const fn (*Context) anyerror!void;
@@ -18,6 +21,7 @@ pub const Route = struct {
     method: HttpMethod,
     pattern: []const u8,
     handler: HandlerFn,
+    middleware_chain: MiddlewareChain,
     allocator: Allocator,
 
     pub fn init(allocator: Allocator, method: HttpMethod, pattern: []const u8, handler: HandlerFn) !*Route {
@@ -26,6 +30,7 @@ pub const Route = struct {
             .method = method,
             .pattern = try allocator.dupe(u8, pattern),
             .handler = handler,
+            .middleware_chain = MiddlewareChain.init(allocator),
             .allocator = allocator,
         };
         return route;
@@ -33,6 +38,12 @@ pub const Route = struct {
 
     pub fn deinit(self: *Route) void {
         self.allocator.free(self.pattern);
+        self.middleware_chain.deinit();
+    }
+
+    /// Add middleware to this specific route
+    pub fn use(self: *Route, name: []const u8, middleware_fn: MiddlewareFn) !void {
+        try self.middleware_chain.use(name, middleware_fn);
     }
 };
 
@@ -130,12 +141,14 @@ fn matchRouteWithParamsRaw(pattern: []const u8, path: []const u8) bool {
 /// High-performance HTTP router
 pub const Router = struct {
     routes: ArrayList(*Route),
+    global_middleware: MiddlewareChain,
     allocator: Allocator,
 
     pub fn init(allocator: Allocator) !*Router {
         const router = try allocator.create(Router);
         router.* = Router{
             .routes = ArrayList(*Route).init(allocator),
+            .global_middleware = MiddlewareChain.init(allocator),
             .allocator = allocator,
         };
         return router;
@@ -147,6 +160,12 @@ pub const Router = struct {
             self.allocator.destroy(route);
         }
         self.routes.deinit();
+        self.global_middleware.deinit();
+    }
+
+    /// Add global middleware that applies to all routes
+    pub fn use(self: *Router, name: []const u8, middleware_fn: MiddlewareFn) !void {
+        try self.global_middleware.use(name, middleware_fn);
     }
 
     /// HTTP method shortcuts
@@ -173,7 +192,7 @@ pub const Router = struct {
         return route;
     }
 
-    /// Handle incoming HTTP request
+    /// Handle incoming HTTP request with middleware support
     pub fn handleRequest(self: *Router, ctx: *Context) !void {
         const method_enum = HttpMethod.fromString(ctx.request.method) orelse {
             return error.InvalidMethod;
@@ -185,7 +204,34 @@ pub const Router = struct {
         // Extract route parameters
         try self.extractParams(route.pattern, ctx.request.path, ctx);
 
-        try route.handler(ctx);
+        // Store route pointer in context for access in nested handlers
+        const route_addr = @intFromPtr(route);
+        const addr_str = try std.fmt.allocPrint(ctx.allocator, "{}", .{route_addr});
+        defer ctx.allocator.free(addr_str);
+        try ctx.setState("__route_ptr", addr_str);
+
+        // Create final handler that executes route-specific middleware + handler
+        const final_handler = struct {
+            fn call(context: *Context) anyerror!void {
+                // Get route from context
+                const route_ptr_str = context.getState("__route_ptr") orelse return error.RouteError;
+                const route_ptr = @as(*Route, @ptrFromInt(std.fmt.parseInt(usize, route_ptr_str, 10) catch return error.RouteError));
+
+                // Execute route-specific middleware chain
+                const route_handler = struct {
+                    fn call_handler(handler_ctx: *Context) anyerror!void {
+                        const r_ptr_str = handler_ctx.getState("__route_ptr") orelse return error.RouteError;
+                        const r_ptr = @as(*Route, @ptrFromInt(std.fmt.parseInt(usize, r_ptr_str, 10) catch return error.RouteError));
+                        return r_ptr.handler(handler_ctx);
+                    }
+                }.call_handler;
+
+                return route_ptr.middleware_chain.execute(context, route_handler);
+            }
+        }.call;
+
+        // Execute global middleware chain first, then route-specific middleware
+        return self.global_middleware.execute(ctx, final_handler);
     }
 
     /// Find matching route

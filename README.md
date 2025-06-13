@@ -6,6 +6,7 @@ A high-performance async HTTP framework for Zig built on top of [libxev](https:/
 
 - **⚡ Async Event-Driven**: Built on libxev for maximum performance and scalability
 - **🛣️ Advanced Routing**: Parameter extraction, wildcards, and middleware support
+- **🔧 Flexible Middleware**: Global and route-specific middleware with built-in common functionality
 - **🛡️ Built-in Protection**: Comprehensive timeout protection and request validation
 - **⚙️ Flexible Configuration**: Multiple preset configurations for different environments
 - **🔒 Memory Safe**: Comprehensive resource management and security validation
@@ -55,6 +56,11 @@ pub fn main() !void {
     // Create HTTP server with default configuration
     var server = try libxev_http.createServer(allocator, "127.0.0.1", 8080);
     defer server.deinit();
+
+    // Add global middleware
+    try server.use("logging", libxev_http.loggingMiddleware);
+    try server.use("request-id", libxev_http.requestIdMiddleware);
+    try server.use("cors", libxev_http.corsMiddleware);
 
     // Set up routes
     _ = try server.get("/", indexHandler);
@@ -138,6 +144,62 @@ const prod_config = libxev_http.HttpConfig.production();
 // Testing configuration (fast timeouts, small limits)
 const test_config = libxev_http.HttpConfig.testing();
 ```
+
+## 🔧 Middleware System
+
+libxev-http provides a powerful middleware system for request/response processing:
+
+### Global Middleware
+
+```zig
+var server = try libxev_http.createServer(allocator, "127.0.0.1", 8080);
+
+// Add global middleware (applies to all routes)
+try server.use("logging", libxev_http.loggingMiddleware);
+try server.use("request-id", libxev_http.requestIdMiddleware);
+try server.use("cors", libxev_http.corsMiddleware);
+try server.use("security", libxev_http.securityHeadersMiddleware);
+```
+
+### Route-Specific Middleware
+
+```zig
+// Create a protected route
+const protected_route = try server.get("/api/protected", protectedHandler);
+
+// Add middleware to this specific route
+try protected_route.use("auth", libxev_http.basicAuthMiddleware);
+try protected_route.use("rate-limit", libxev_http.rateLimitMiddleware);
+```
+
+### Custom Middleware
+
+```zig
+fn customMiddleware(ctx: *libxev_http.Context, next: libxev_http.NextFn) !void {
+    // Pre-processing
+    try ctx.setHeader("X-Custom", "middleware-executed");
+
+    // Call next middleware/handler
+    try next(ctx);
+
+    // Post-processing (optional)
+}
+
+// Use custom middleware
+try server.use("custom", customMiddleware);
+```
+
+### Built-in Middleware
+
+- **`loggingMiddleware`**: Request logging with timing
+- **`requestIdMiddleware`**: Unique request ID generation
+- **`corsMiddleware`**: CORS headers support
+- **`securityHeadersMiddleware`**: Security headers (XSS, CSRF protection)
+- **`basicAuthMiddleware`**: HTTP Basic authentication
+- **`jsonBodyParserMiddleware`**: JSON request validation
+- **`rateLimitMiddleware`**: Rate limiting headers
+- **`errorHandlerMiddleware`**: Error handling and recovery
+- **`compressionMiddleware`**: Response compression support
 
 ## 🛡️ Built-in Protection
 
@@ -249,6 +311,7 @@ The framework is built with a modular architecture:
 - **`response.zig`**: HTTP response building with headers and cookies
 - **`router.zig`**: High-performance routing with parameter extraction
 - **`context.zig`**: Request context management and response helpers
+- **`middleware.zig`**: Flexible middleware system with built-in common functionality
 - **`security.zig`**: Timeout protection and request validation
 - **`config.zig`**: Configuration management and presets
 - **`buffer.zig`**: Efficient buffer management
@@ -267,6 +330,7 @@ zig build test-all
 # Run specific module tests
 zig build test-security          # Security and timeout protection
 zig build test-router            # Routing functionality
+zig build test-middleware        # Middleware system
 zig build test-request           # HTTP request parsing
 zig build test-response          # HTTP response building
 
@@ -337,6 +401,7 @@ When running the example server:
 
 ### Documentation
 
+- **[Middleware System](MIDDLEWARE.md)**: Complete guide to the middleware system
 - **[Timeout Protection](TIMEOUT_PROTECTION.md)**: Comprehensive guide to timeout protection and request validation
 - **[Multi-Mode Example](MULTI_MODE_EXAMPLE.md)**: Detailed explanation of the example server modes
 - **[Build System](BUILD_SYSTEM.md)**: Complete build system documentation

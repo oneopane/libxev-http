@@ -146,6 +146,14 @@ pub fn build(b: *std.Build) void {
     });
     url_tests.root_module.addImport("xev", libxev_dep.module("xev"));
 
+    // Middleware module tests
+    const middleware_tests = b.addTest(.{
+        .root_source_file = b.path("src/middleware.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    middleware_tests.root_module.addImport("xev", libxev_dep.module("xev"));
+
     // ============================================================================
     // Test Execution Steps
     // ============================================================================
@@ -159,6 +167,7 @@ pub fn build(b: *std.Build) void {
     const run_config_tests = b.addRunArtifact(config_tests);
     const run_security_tests = b.addRunArtifact(security_tests);
     const run_url_tests = b.addRunArtifact(url_tests);
+    const run_middleware_tests = b.addRunArtifact(middleware_tests);
 
     // Individual module test steps
     const request_test_step = b.step("test-request", "📨 Run HTTP request module tests");
@@ -184,6 +193,9 @@ pub fn build(b: *std.Build) void {
 
     const url_test_step = b.step("test-url", "🔗 Run URL encoding/decoding module tests");
     url_test_step.dependOn(&run_url_tests.step);
+
+    const middleware_test_step = b.step("test-middleware", "🔧 Run middleware module tests");
+    middleware_test_step.dependOn(&run_middleware_tests.step);
 
     // ============================================================================
     // Comprehensive Test Suites
@@ -259,6 +271,7 @@ pub fn build(b: *std.Build) void {
         \\  test-config                Test configuration module
         \\  test-security              Test security and timeout protection
         \\  test-url                   Test URL encoding/decoding module
+        \\  test-middleware            Test middleware module
         \\
         \\💡 Usage Examples:
         \\  zig build run-basic -- --mode=secure

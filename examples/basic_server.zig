@@ -97,6 +97,29 @@ pub fn main() !void {
     var server = try libxev_http.createServerWithConfig(allocator, "127.0.0.1", config.port, config);
     defer server.deinit();
 
+    // Add global middleware based on mode
+    switch (mode) {
+        .basic => {
+            // Basic middleware for general use
+            try server.use("logging", libxev_http.loggingMiddleware);
+            try server.use("request-id", libxev_http.requestIdMiddleware);
+        },
+        .secure => {
+            // Comprehensive middleware for secure mode
+            try server.use("logging", libxev_http.loggingMiddleware);
+            try server.use("request-id", libxev_http.requestIdMiddleware);
+            try server.use("security-headers", libxev_http.securityHeadersMiddleware);
+            try server.use("json-parser", libxev_http.jsonBodyParserMiddleware);
+            try server.use("error-handler", libxev_http.errorHandlerMiddleware);
+        },
+        .dev => {
+            // Development-friendly middleware
+            try server.use("logging", libxev_http.loggingMiddleware);
+            try server.use("request-id", libxev_http.requestIdMiddleware);
+            try server.use("cors", libxev_http.corsMiddleware);
+        },
+    }
+
     // Set up common routes
     _ = try server.get("/", indexHandler);
     _ = try server.get("/api/status", statusHandler);
@@ -107,7 +130,15 @@ pub fn main() !void {
     if (mode == .secure) {
         _ = try server.get("/health", healthHandler);
         _ = try server.get("/config", configHandler);
-        _ = try server.post("/upload", uploadHandler);
+
+        // Protected upload endpoint with custom validation
+        const upload_route = try server.post("/upload", uploadHandler);
+        try upload_route.use("upload-validator", uploadValidationMiddleware);
+
+        // Admin endpoint with basic auth
+        const admin_route = try server.get("/admin", adminHandler);
+        try admin_route.use("auth", libxev_http.basicAuthMiddleware);
+
         _ = try server.get("/stress-test", stressTestHandler);
     }
 
@@ -169,14 +200,28 @@ fn indexHandler(ctx: *libxev_http.Context) !void {
             \\        </ul>
             \\    </div>
             \\
+            \\    <div class="security">
+            \\        <h3>🔧 Middleware Features</h3>
+            \\        <ul>
+            \\            <li>Request logging with timing</li>
+            \\            <li>Unique request ID generation</li>
+            \\            <li>Security headers (XSS, CSRF protection)</li>
+            \\            <li>JSON body validation</li>
+            \\            <li>Error handling and recovery</li>
+            \\            <li>Route-specific authentication</li>
+            \\            <li>Custom upload validation</li>
+            \\        </ul>
+            \\    </div>
+            \\
             \\    <div class="endpoint">
             \\        <h3>📚 Available Endpoints</h3>
             \\        <ul>
             \\            <li><a href="/health">GET /health</a> - Health check</li>
-            \\            <li><a href="/api/status">GET /api/status</a> - Server status</li>
+            \\            <li><a href="/api/status">GET /api/status</a> - Server status with middleware info</li>
             \\            <li><a href="/config">GET /config</a> - Configuration details</li>
             \\            <li>POST /api/echo - Echo request body</li>
-            \\            <li>POST /upload - File upload (size limited)</li>
+            \\            <li>POST /upload - File upload with validation middleware</li>
+            \\            <li>GET /admin - Protected admin panel (requires Basic auth: user/pass)</li>
             \\            <li><a href="/stress-test">GET /stress-test</a> - Timeout test</li>
             \\            <li>GET /users/:id - User profile (try <a href="/users/123">/users/123</a>)</li>
             \\        </ul>
@@ -227,14 +272,24 @@ fn indexHandler(ctx: *libxev_http.Context) !void {
             \\    </div>
             \\
             \\    <div class="feature">
-            \\        <h3>🔒 Production Ready</h3>
+            \\        <h3>� Middleware System</h3>
+            \\        <p>Global and route-specific middleware with built-in common functionality</p>
+            \\        <ul>
+            \\            <li>Request logging and timing</li>
+            \\            <li>Request ID generation</li>
+            \\            <li>CORS support (dev mode)</li>
+            \\        </ul>
+            \\    </div>
+            \\
+            \\    <div class="feature">
+            \\        <h3>�🔒 Production Ready</h3>
             \\        <p>Memory safe, cross-platform, and battle-tested</p>
             \\    </div>
             \\
             \\    <div class="feature">
             \\        <h3>📚 API Endpoints</h3>
             \\        <ul>
-            \\            <li><a href="/api/status">GET /api/status</a> - Server status</li>
+            \\            <li><a href="/api/status">GET /api/status</a> - Server status with middleware info</li>
             \\            <li>POST /api/echo - Echo request body</li>
             \\            <li>GET /users/:id - User profile (try <a href="/users/123">/users/123</a>)</li>
             \\        </ul>
@@ -247,9 +302,32 @@ fn indexHandler(ctx: *libxev_http.Context) !void {
 
 fn statusHandler(ctx: *libxev_http.Context) !void {
     const timestamp = std.time.timestamp();
+    const request_id = ctx.getState("request_id") orelse "unknown";
+
+    // Detect mode based on request host/port
+    const host_header = ctx.getHeader("Host") orelse "localhost:8080";
+    const mode_str = if (std.mem.indexOf(u8, host_header, ":8082") != null) "secure" else "basic";
+
+    const security_headers = if (std.mem.eql(u8, mode_str, "secure")) "true" else "false";
+    const cors_support = if (std.mem.eql(u8, mode_str, "dev")) "true" else "false";
+
     const status_json = try std.fmt.allocPrint(ctx.allocator,
-        \\{{"status":"ok","server":"libxev-http","version":"{s}","timestamp":{d}}}
-    , .{ libxev_http.version, timestamp });
+        \\{{
+        \\  "status": "ok",
+        \\  "server": "libxev-http",
+        \\  "version": "{s}",
+        \\  "mode": "{s}",
+        \\  "request_id": "{s}",
+        \\  "timestamp": {d},
+        \\  "middleware": {{
+        \\    "global_enabled": true,
+        \\    "request_logging": true,
+        \\    "request_id_generation": true,
+        \\    "security_headers": {s},
+        \\    "cors_support": {s}
+        \\  }}
+        \\}}
+    , .{ libxev_http.version, mode_str, request_id, timestamp, security_headers, cors_support });
     defer ctx.allocator.free(status_json);
 
     try ctx.json(status_json);
@@ -338,6 +416,8 @@ fn configHandler(ctx: *libxev_http.Context) !void {
 
 fn uploadHandler(ctx: *libxev_http.Context) !void {
     const body = ctx.getBody() orelse "";
+    const request_id = ctx.getState("request_id") orelse "unknown";
+    const upload_validated = ctx.getState("upload_validated") orelse "false";
 
     if (body.len == 0) {
         ctx.status(.bad_request);
@@ -354,12 +434,15 @@ fn uploadHandler(ctx: *libxev_http.Context) !void {
     const response = try std.fmt.allocPrint(ctx.allocator,
         \\{{
         \\  "message": "Upload received",
+        \\  "request_id": "{s}",
         \\  "size": {},
         \\  "max_allowed": 5242880,
         \\  "status": "{s}",
+        \\  "validation_passed": {s},
+        \\  "middleware_applied": ["upload-validator"],
         \\  "security_check": "passed"
         \\}}
-    , .{ body.len, status_str });
+    , .{ request_id, body.len, status_str, upload_validated });
     defer ctx.allocator.free(response);
 
     if (body.len > 5242880) {
@@ -380,4 +463,65 @@ fn stressTestHandler(ctx: *libxev_http.Context) !void {
         \\  "note": "This endpoint tests timeout handling"
         \\}
     );
+}
+
+fn adminHandler(ctx: *libxev_http.Context) !void {
+    const request_id = ctx.getState("request_id") orelse "unknown";
+
+    const admin_json = try std.fmt.allocPrint(ctx.allocator,
+        \\{{
+        \\  "message": "Admin panel access granted",
+        \\  "request_id": "{s}",
+        \\  "middleware_applied": ["logging", "request-id", "security-headers", "json-parser", "error-handler", "auth"],
+        \\  "timestamp": {d},
+        \\  "note": "This endpoint requires HTTP Basic authentication"
+        \\}}
+    , .{ request_id, std.time.timestamp() });
+    defer ctx.allocator.free(admin_json);
+
+    try ctx.json(admin_json);
+}
+
+// Custom middleware for upload validation
+fn uploadValidationMiddleware(ctx: *libxev_http.Context, next: libxev_http.NextFn) !void {
+    std.log.info("🔍 Upload validation middleware executing", .{});
+
+    const content_type = ctx.getHeader("Content-Type");
+    const content_length = ctx.getHeader("Content-Length");
+
+    // Validate Content-Type
+    if (content_type == null) {
+        ctx.status(.bad_request);
+        try ctx.json(
+            \\{
+            \\  "error": "Content-Type header required",
+            \\  "message": "Please specify the content type of your upload"
+            \\}
+        );
+        return;
+    }
+
+    // Validate Content-Length
+    if (content_length != null) {
+        const length = std.fmt.parseInt(usize, content_length.?, 10) catch 0;
+        if (length > 5242880) { // 5MB limit
+            ctx.status(.payload_too_large);
+            try ctx.json(
+                \\{
+                \\  "error": "File too large",
+                \\  "message": "Maximum upload size is 5MB",
+                \\  "max_size": 5242880
+                \\}
+            );
+            return;
+        }
+    }
+
+    // Set validation state
+    try ctx.setState("upload_validated", "true");
+    try ctx.setHeader("X-Upload-Validation", "passed");
+
+    std.log.info("✅ Upload validation passed", .{});
+
+    return next(ctx);
 }
