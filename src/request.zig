@@ -27,31 +27,12 @@ pub const HttpMethod = enum {
 
     /// Convert string to HTTP method enum
     pub fn fromString(method_str: []const u8) ?HttpMethod {
-        if (std.mem.eql(u8, method_str, "GET")) return .GET;
-        if (std.mem.eql(u8, method_str, "POST")) return .POST;
-        if (std.mem.eql(u8, method_str, "PUT")) return .PUT;
-        if (std.mem.eql(u8, method_str, "DELETE")) return .DELETE;
-        if (std.mem.eql(u8, method_str, "PATCH")) return .PATCH;
-        if (std.mem.eql(u8, method_str, "HEAD")) return .HEAD;
-        if (std.mem.eql(u8, method_str, "OPTIONS")) return .OPTIONS;
-        if (std.mem.eql(u8, method_str, "TRACE")) return .TRACE;
-        if (std.mem.eql(u8, method_str, "CONNECT")) return .CONNECT;
-        return null;
+        return std.meta.stringToEnum(HttpMethod, method_str);
     }
 
     /// Convert HTTP method enum to string
     pub fn toString(self: HttpMethod) []const u8 {
-        return switch (self) {
-            .GET => "GET",
-            .POST => "POST",
-            .PUT => "PUT",
-            .DELETE => "DELETE",
-            .PATCH => "PATCH",
-            .HEAD => "HEAD",
-            .OPTIONS => "OPTIONS",
-            .TRACE => "TRACE",
-            .CONNECT => "CONNECT",
-        };
+        return @tagName(self);
     }
 };
 

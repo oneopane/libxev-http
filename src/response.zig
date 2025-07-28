@@ -11,6 +11,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const ArrayList = std.ArrayList;
 const StringHashMap = std.StringHashMap;
+const utils = @import("utils.zig");
 
 /// HTTP status codes
 pub const StatusCode = enum(u16) {
@@ -48,25 +49,8 @@ pub const StatusCode = enum(u16) {
     pub fn toString(self: StatusCode) []const u8 {
         return switch (self) {
             .continue_status => "Continue",
-            .switching_protocols => "Switching Protocols",
             .ok => "OK",
-            .created => "Created",
-            .accepted => "Accepted",
-            .no_content => "No Content",
-            .moved_permanently => "Moved Permanently",
-            .found => "Found",
-            .not_modified => "Not Modified",
-            .bad_request => "Bad Request",
-            .unauthorized => "Unauthorized",
-            .forbidden => "Forbidden",
-            .not_found => "Not Found",
-            .method_not_allowed => "Method Not Allowed",
-            .conflict => "Conflict",
-            .payload_too_large => "Payload Too Large",
-            .internal_server_error => "Internal Server Error",
-            .not_implemented => "Not Implemented",
-            .bad_gateway => "Bad Gateway",
-            .service_unavailable => "Service Unavailable",
+            inline else => |tag| comptime utils.snakeCaseToTitleCase(@tagName(tag)),
         };
     }
 };
